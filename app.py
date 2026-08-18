@@ -48,10 +48,18 @@ def _reprocess(uploaded_file, source_df: pd.DataFrame):
     st.session_state["editor_nonce"] = st.session_state.get("editor_nonce", 0) + 1
 
 
+def _save_place(place: str, district: str, uploaded_file, source_df) -> None:
+    saved_name = upsert_user_locality(place, district)
+    if uploaded_file is not None and source_df is not None and "result" in st.session_state:
+        _reprocess(uploaded_file, source_df)
+    st.success(f"Сохранено: «{saved_name}» → {district}. При следующей обработке будет этот район.")
+    st.rerun()
+
+
 st.title("Нормализатор городов Краснодарского края")
 st.caption(
     "Приводит столбец «город» к короткому названию района. "
-    "Неоднозначные строки — сверху, жёлтым; неизвестные — красным."
+    "Жёлтые строки — несколько районов, красные — пункт не найден: назначьте район ниже."
 )
 
 uploaded = st.file_uploader(
@@ -85,23 +93,14 @@ else:
         "Столбец с городом / населённым пунктом",
         options=columns,
         index=default_index,
-        help="По умолчанию выбран столбец, определённый автоматически.",
     )
     add_original = st.checkbox("Добавить столбец с оригинальным значением", value=True)
     with st.expander("Дополнительно: насколько строго искать похожие названия"):
         st.markdown(
-            "Порог — насколько название в таблице может **отличаться** от справочника "
-            "(опечатки вроде «Соччи» → Сочи).\n\n"
-            "- **82** — обычный режим, так и оставляйте.\n"
-            "- **Ниже** (70–80) — программа угадывает смелее, больше ошибок.\n"
-            "- **Выше** (90–100) — только почти точные совпадения."
+            "Порог — насколько название может отличаться от справочника "
+            "(опечатки вроде «Соччи» → Сочи). Обычно **82**, трогать не нужно."
         )
-        threshold = st.slider(
-            "Порог похожести",
-            min_value=50,
-            max_value=100,
-            value=DEFAULT_THRESHOLD,
-        )
+        threshold = st.slider("Порог похожести", 50, 100, DEFAULT_THRESHOLD)
 
     if st.button("Обработать", type="primary"):
         with st.spinner("Нормализация…"):
@@ -136,22 +135,92 @@ else:
         col_uncertain.metric("Не уверен", result.uncertain)
         col_unmatched.metric("Не сопоставлено", result.unmatched)
 
-        st.caption(
-            "Жёлтым сверху — несколько районов или нечёткое совпадение. "
-            "Красным — населённый пункт не найден в справочнике."
-        )
-        st.subheader("Предпросмотр")
-        st.dataframe(style_preview(result.df), use_container_width=True, height=520)
+        unresolved = unique_unresolved_from_matches(result.originals, result.matches)
 
+        st.divider()
+        st.subheader("1. Назначить район пункту, которого нет в справочнике")
+        st.markdown(
+            "Красная строка = программа **не знает** этот хутор/станицу. "
+            "Выберите его в списке, укажите район **из всех 44** и нажмите сохранение. "
+            "Так вы добавляете пункт в справочник."
+        )
+
+        if unresolved.empty:
+            st.success("Все названия из файла сопоставлены.")
+        else:
+            labels = []
+            for _, row in unresolved.iterrows():
+                extra = f", варианты: {row['варианты']}" if str(row["варианты"]).strip() else ""
+                labels.append(
+                    f"{row['населённый пункт']}  —  {row['статус']}  ({row['строк']} строк{extra})"
+                )
+            chosen = st.selectbox(
+                "Какой населённый пункт уточнить",
+                options=list(range(len(unresolved))),
+                format_func=lambda i: labels[i],
+            )
+            chosen_row = unresolved.iloc[chosen]
+            place_name = str(chosen_row["населённый пункт"])
+            variants_raw = str(chosen_row["варианты"]).strip()
+            variant_list = [v.strip() for v in variants_raw.split("/") if v.strip()] if variants_raw else []
+
+            if variant_list:
+                st.info("Программа предлагает такие районы: **" + ", ".join(variant_list) + "**. Можно выбрать любой из 44.")
+            else:
+                st.warning(
+                    f"«{place_name}» в справочнике нет. Выберите район вручную — после сохранения программа будет его знать."
+                )
+
+            default_district = variant_list[0] if variant_list and variant_list[0] in SHORT_DISTRICT_LIST else SHORT_DISTRICT_LIST[0]
+            district = st.selectbox(
+                "Район",
+                options=SHORT_DISTRICT_LIST,
+                index=SHORT_DISTRICT_LIST.index(default_district),
+                key="assign_district",
+            )
+            if st.button("Сохранить этот пункт в справочник", type="primary"):
+                try:
+                    _save_place(place_name, district, uploaded, df)
+                except ValueError as exc:
+                    st.error(str(exc))
+
+        st.markdown("**Пункта нет даже в списке выше? Впишите название сами:**")
+        man_col1, man_col2, man_col3 = st.columns([2, 2, 1])
+        with man_col1:
+            typed_place = st.text_input("Название станицы / хутора / села", placeholder="например Цыпка")
+        with man_col2:
+            typed_district = st.selectbox("Район для нового пункта", options=SHORT_DISTRICT_LIST, key="typed_district")
+        with man_col3:
+            st.write("")
+            st.write("")
+            typed_save = st.button("Добавить", key="typed_save")
+        if typed_save:
+            try:
+                _save_place(typed_place, typed_district, uploaded, df)
+            except ValueError as exc:
+                st.error(str(exc))
+
+        st.divider()
+        st.subheader("2. Предпросмотр таблицы")
+        st.caption("Жёлтым сверху — не уверена (несколько районов). Красным — не найдено.")
+        st.dataframe(style_preview(result.df), use_container_width=True, height=480)
+
+        st.subheader("3. Скачать результат")
         stem = uploaded.name.rsplit(".", 1)[0]
         dl_xlsx, dl_csv = st.columns(2)
+        try:
+            xlsx_data = to_excel_bytes(result.df)
+        except Exception as exc:  # noqa: BLE001
+            xlsx_data = None
+            st.error(f"Не удалось собрать Excel: {exc}")
         with dl_xlsx:
-            st.download_button(
-                "Скачать xlsx",
-                data=to_excel_bytes(result.df),
-                file_name=f"{stem}_normalized.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+            if xlsx_data is not None:
+                st.download_button(
+                    "Скачать xlsx",
+                    data=xlsx_data,
+                    file_name=f"{stem}_normalized.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
         with dl_csv:
             st.download_button(
                 "Скачать csv",
@@ -160,75 +229,27 @@ else:
                 mime="text/csv",
             )
 
-        unresolved = unique_unresolved_from_matches(result.originals, result.matches)
-        st.divider()
-        st.subheader("Уточнить станицы и населённые пункты")
-        st.caption(
-            "Выберите район для неизвестных или неоднозначных пунктов. "
-            "Запись сохранится в справочнике и будет использоваться дальше."
-        )
-        if unresolved.empty:
-            st.success("Неизвестных и неоднозначных названий в этом файле нет.")
-        else:
-            edited = st.data_editor(
-                unresolved,
-                column_config={
-                    "населённый пункт": st.column_config.TextColumn(disabled=True),
-                    "статус": st.column_config.TextColumn(disabled=True),
-                    "варианты": st.column_config.TextColumn(
-                        "Возможные районы",
-                        disabled=True,
-                    ),
-                    "район": st.column_config.SelectboxColumn(
-                        "Назначить район",
-                        options=["не выбран"] + SHORT_DISTRICT_LIST,
-                    ),
-                    "строк": st.column_config.NumberColumn(disabled=True),
-                },
-                hide_index=True,
-                use_container_width=True,
-                key=f"unresolved_editor_{st.session_state.get('editor_nonce', 0)}",
-            )
-            if st.button("Сохранить выбранные районы", type="primary"):
-                saved = 0
-                for _, row in edited.iterrows():
-                    district = str(row.get("район", "")).strip()
-                    place = str(row.get("населённый пункт", "")).strip()
-                    if place and district and district not in {"", "не выбран", "nan"}:
-                        upsert_user_locality(place, district)
-                        saved += 1
-                if saved:
-                    _reprocess(uploaded, df)
-                    st.success(f"Сохранено записей: {saved}. Таблица пересчитана.")
-                    st.rerun()
-                else:
-                    st.warning("Выберите район хотя бы для одной строки.")
-
 st.divider()
-st.subheader("Справочник населённых пунктов")
-st.caption("Сюда можно добавить станицу, хутор или село, которого нет в программе.")
-
-with st.form("add_place_form", clear_on_submit=True):
-    add_col1, add_col2 = st.columns(2)
-    with add_col1:
-        new_place = st.text_input("Название (станица, хутор, село, город)")
-    with add_col2:
-        new_district = st.selectbox("Район", options=SHORT_DISTRICT_LIST)
-    submitted = st.form_submit_button("Добавить в справочник")
-    if submitted:
-        try:
-            saved_name = upsert_user_locality(new_place, new_district)
-        except ValueError as exc:
-            st.error(str(exc))
-        else:
-            if uploaded is not None and df is not None and "result" in st.session_state:
-                _reprocess(uploaded, df)
-            st.success(f"«{saved_name}» → {new_district}")
-            st.rerun()
+st.subheader("Мой справочник")
+st.caption("Любой неизвестный пункт можно добавить здесь — даже без файла.")
+ref_col1, ref_col2, ref_col3 = st.columns([2, 2, 1])
+with ref_col1:
+    dict_place = st.text_input("Новый населённый пункт", key="dict_place")
+with ref_col2:
+    dict_district = st.selectbox("Его район", options=SHORT_DISTRICT_LIST, key="dict_district")
+with ref_col3:
+    st.write("")
+    st.write("")
+    dict_save = st.button("Добавить в справочник", key="dict_save")
+if dict_save:
+    try:
+        _save_place(dict_place, dict_district, uploaded, df)
+    except ValueError as exc:
+        st.error(str(exc))
 
 user_map = load_user_localities()
 if not user_map:
-    st.caption("Пока пусто — добавленные пункты появятся в этом списке.")
+    st.caption("Пока пусто. Когда сохраните пункт — он появится здесь.")
 else:
     user_df = pd.DataFrame(
         [

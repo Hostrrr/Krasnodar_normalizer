@@ -252,21 +252,31 @@ def fuzzy_lookup(
     threshold: int = DEFAULT_THRESHOLD,
     user_map: dict[str, str] | None = None,
 ) -> MatchResult | None:
-    """Нечёткий поиск среди ключей справочника."""
+    """Нечёткий поиск: несколько похожих ключей → несколько районов в «вариантах»."""
     query = _fold(name)
     if not query:
         return None
     lookup = merged_locality_map(user_map)
-    hit = process.extractOne(
+    hits = process.extract(
         query,
         list(lookup.keys()),
         scorer=fuzz.WRatio,
         score_cutoff=threshold,
+        limit=8,
     )
-    if hit is None:
+    if not hits:
         return None
-    key, score = hit[0], float(hit[1])
-    return _from_districts(lookup[key], cleaned=name, method="fuzzy", score=score)
+    officials: list[str] = []
+    for key, _score, *_rest in hits:
+        for district in lookup[key]:
+            if district not in officials:
+                officials.append(district)
+    return _from_districts(
+        officials,
+        cleaned=name,
+        method="fuzzy",
+        score=float(hits[0][1]),
+    )
 
 
 def match_city(
