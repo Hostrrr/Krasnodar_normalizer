@@ -378,6 +378,7 @@ _DISTRICT_LOCALITIES: dict[str, list[str]] = {
         "Саук-Дере",
         "Кеслерово",
         "Неберджаевская",
+        "Троицкая",
         "Адагум",
         "Греческий",
         "Пригородный",
@@ -411,6 +412,8 @@ _DISTRICT_LOCALITIES: dict[str, list[str]] = {
         "Глебовка",
         "Степная",
         "Новомихайловское",
+        "Ильинская",
+        "Раздольная",
         "Ильинская Кущёвская",
         "Красная Поляна Кущёвская",
         "Раздольная Кущёвская",
@@ -828,9 +831,82 @@ def _fold(name: str) -> str:
     return " ".join(name.lower().replace("ё", "е").split())
 
 
+# Короткие названия для вывода: у районов — первое слово, у городских округов — город.
+SHORT_DISTRICT_NAMES: dict[str, str] = {
+    "Абинский муниципальный район": "Абинский",
+    "Муниципальный округ город-курорт Анапа": "Анапа",
+    "Апшеронский муниципальный район": "Апшеронский",
+    "Городской округ город Армавир": "Армавир",
+    "Белоглинский муниципальный район": "Белоглинский",
+    "Белореченский муниципальный район": "Белореченский",
+    "Брюховецкий муниципальный район": "Брюховецкий",
+    "Выселковский муниципальный район": "Выселковский",
+    "Городской округ город-курорт Геленджик": "Геленджик",
+    "Муниципальный округ город Горячий Ключ": "Горячий Ключ",
+    "Гулькевичский муниципальный район": "Гулькевичский",
+    "Динской муниципальный район": "Динской",
+    "Ейский муниципальный район": "Ейский",
+    "Кавказский муниципальный район": "Кавказский",
+    "Калининский район": "Калининский",
+    "Каневской район": "Каневской",
+    "Кореновский район": "Кореновский",
+    "Красноармейский район": "Красноармейский",
+    "Городской округ город Краснодар": "Краснодар",
+    "Крыловский муниципальный район": "Крыловский",
+    "Крымский муниципальный район": "Крымский",
+    "Курганинский муниципальный район": "Курганинский",
+    "Кущёвский муниципальный район": "Кущёвский",
+    "Лабинский муниципальный район": "Лабинский",
+    "Ленинградский муниципальный округ": "Ленинградский",
+    "Мостовский муниципальный район": "Мостовский",
+    "Новокубанский муниципальный район": "Новокубанский",
+    "Новопокровский муниципальный район": "Новопокровский",
+    "Городской округ город-герой Новороссийск": "Новороссийск",
+    "Отрадненский муниципальный район": "Отрадненский",
+    "Павловский муниципальный район": "Павловский",
+    "Приморско-Ахтарский муниципальный округ": "Приморско-Ахтарский",
+    "Северский муниципальный район": "Северский",
+    "Славянский муниципальный район": "Славянский",
+    "Городской округ город-курорт Сочи": "Сочи",
+    "Староминский муниципальный район": "Староминский",
+    "Тбилисский муниципальный район": "Тбилисский",
+    "Темрюкский муниципальный район": "Темрюкский",
+    "Тимашевский муниципальный район": "Тимашевский",
+    "Тихорецкий муниципальный район": "Тихорецкий",
+    "Туапсинский муниципальный округ": "Туапсинский",
+    "Успенский муниципальный район": "Успенский",
+    "Усть-Лабинский муниципальный район": "Усть-Лабинский",
+    "Щербиновский муниципальный район": "Щербиновский",
+}
+
+SHORT_DISTRICT_LIST: list[str] = [SHORT_DISTRICT_NAMES[d] for d in OFFICIAL_DISTRICTS]
+
+
+def to_short(official_or_short: str) -> str:
+    """Официальное или уже короткое название → короткое."""
+    if official_or_short in SHORT_DISTRICT_NAMES:
+        return SHORT_DISTRICT_NAMES[official_or_short]
+    folded = _fold(official_or_short)
+    for official, short in SHORT_DISTRICT_NAMES.items():
+        if _fold(official) == folded or _fold(short) == folded:
+            return short
+    return official_or_short
+
+
+def to_official(name: str) -> str | None:
+    """Короткое или официальное название → официальное МО."""
+    if name in OFFICIAL_DISTRICTS:
+        return name
+    folded = _fold(name)
+    for official, short in SHORT_DISTRICT_NAMES.items():
+        if _fold(official) == folded or _fold(short) == folded:
+            return official
+    return None
+
+
 def _district_aliases(official: str) -> list[str]:
     """Короткие формы официального названия: «Абинский район», «город Краснодар» и т.д."""
-    aliases = [official]
+    aliases = [official, SHORT_DISTRICT_NAMES[official]]
     stripped = official
     for token in (
         "Муниципальный округ ",
@@ -869,20 +945,48 @@ def _district_aliases(official: str) -> list[str]:
     return aliases
 
 
-def _build_locality_to_district() -> dict[str, str]:
-    mapping: dict[str, str] = {}
+def _unique(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item and item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+
+def _build_locality_to_districts() -> dict[str, list[str]]:
+    """Ключ — свёрнутое имя НП; значение — все подходящие официальные МО."""
+    mapping: dict[str, list[str]] = {}
+    short_fold = {_fold(short) for short in SHORT_DISTRICT_NAMES.values()}
+    short_owner = {_fold(short): official for official, short in SHORT_DISTRICT_NAMES.items()}
 
     def add(key: str, district: str) -> None:
         folded = _fold(key)
-        if folded and folded not in mapping:
-            mapping[folded] = district
+        if not folded:
+            return
+        # «Сочи», «Горячий Ключ», «Абинский» не смешиваем с одноимёнными хуторами.
+        if folded in short_owner and district != short_owner[folded]:
+            return
+        bucket = mapping.setdefault(folded, [])
+        if district not in bucket:
+            bucket.append(district)
 
     for district, places in _DISTRICT_LOCALITIES.items():
         for alias in _district_aliases(district):
             add(alias, district)
         for place in places:
             add(place, district)
+            parts = place.split()
+            if len(parts) >= 2 and _fold(parts[-1]) in short_fold:
+                add(" ".join(parts[:-1]), district)
+            if len(parts) >= 3 and _fold(" ".join(parts[-2:])) in short_fold:
+                add(" ".join(parts[:-2]), district)
     return mapping
 
 
-LOCALITY_TO_DISTRICT: dict[str, str] = _build_locality_to_district()
+LOCALITY_TO_DISTRICTS: dict[str, list[str]] = _build_locality_to_districts()
+# Первое МО — для обратной совместимости.
+LOCALITY_TO_DISTRICT: dict[str, str] = {
+    key: districts[0] for key, districts in LOCALITY_TO_DISTRICTS.items()
+}
