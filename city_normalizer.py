@@ -457,9 +457,17 @@ def _style_worksheet(ws, df: pd.DataFrame) -> None:
             ws.cell(row=row_idx, column=status_idx).font = FONT_BOLD
 
     for col_idx, name in enumerate(df.columns, start=1):
-        series = df[name].astype(str)
-        samples = [len(str(name))] + [len(v) for v in series.head(80)]
-        width = min(max(samples, default=10) + 2, 48)
+        widths = [len(str(name))]
+        for value in df[name].head(80):
+            if value is None:
+                continue
+            try:
+                if pd.isna(value):
+                    continue
+            except (TypeError, ValueError):
+                pass
+            widths.append(len(str(value)))
+        width = min(max(widths, default=10) + 2, 48)
         ws.column_dimensions[get_column_letter(col_idx)].width = width
 
 
